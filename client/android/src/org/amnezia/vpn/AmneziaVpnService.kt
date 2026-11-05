@@ -50,6 +50,7 @@ import org.amnezia.vpn.protocol.ProtocolState.UNKNOWN
 import org.amnezia.vpn.protocol.VpnException
 import org.amnezia.vpn.protocol.VpnStartException
 import org.amnezia.vpn.protocol.putStatus
+import org.amnezia.vpn.protocol.wireguard.KernelTunnel
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
@@ -514,14 +515,16 @@ open class AmneziaVpnService : VpnService() {
 
         protocolState.value = CONNECTING
 
-        if (!checkPermission()) {
-            protocolState.value = DISCONNECTED
-            return
-        }
-
         connectionJob = connectionScope.launch {
             disconnectionJob?.join()
             disconnectionJob = null
+
+            // The kernel tunnel never calls VpnService.Builder, so it needs no VPN consent
+            val useKernel = vpnProto == VpnProto.AWG && KernelTunnel.isAvailable()
+            if (!useKernel && !checkPermission()) {
+                protocolState.value = DISCONNECTED
+                return@launch
+            }
 
             vpnProto?.protocol?.let { protocol ->
                 protocol.initialize(applicationContext, protocolState, ::onError)

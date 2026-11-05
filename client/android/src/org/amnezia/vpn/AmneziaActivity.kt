@@ -58,6 +58,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import org.amnezia.vpn.protocol.awg.IF_NAME
+import org.amnezia.vpn.protocol.wireguard.KernelTunnel
 import org.amnezia.vpn.protocol.getStatistics
 import org.amnezia.vpn.protocol.getStatus
 import org.amnezia.vpn.qt.QtAndroidController
@@ -79,7 +82,7 @@ private const val CHECK_NOTIFICATION_PERMISSION_ACTION_CODE = 4
 private const val PREFS_NOTIFICATION_PERMISSION_ASKED = "NOTIFICATION_PERMISSION_ASKED"
 private const val OPEN_FILE_AFTER_RESUME_DELAY_MS = 400L
 private const val KEY_PENDING_OPEN_FILE_URI = "pending_open_file_uri"
-private const val FILE_PROVIDER_AUTHORITY = "org.amnezia.vpn.qtprovider"
+private const val FILE_PROVIDER_AUTHORITY = "org.amnezia.vpn.kernel.qtprovider"
 
 class AmneziaActivity : QtActivity() {
 
@@ -271,11 +274,25 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Start Amnezia activity")
         mainScope.launch {
             qtInitialized.await()
-            vpnProto?.let { proto ->
-                if (AmneziaVpnService.isRunning(applicationContext, proto.processName)) {
-                    doBindService()
-                }
+            val isServiceRunning = vpnProto?.let { AmneziaVpnService.isRunning(applicationContext, it.processName) } == true
+            if (isServiceRunning) {
+                doBindService()
+            } else if (withContext(Dispatchers.IO) { KernelTunnel.isInterfaceUp(IF_NAME) }) {
+                adoptKernelTunnel()
             }
+        }
+    }
+
+    /** The kernel tunnel outlives the service, so restart the service with its saved config to regain control. */
+    private fun adoptKernelTunnel() {
+        Log.d(TAG, "Kernel tunnel is up without a service, restarting it")
+        vpnProto = VpnProto.AWG
+        isWaitingStatus = false
+        try {
+            ContextCompat.startForegroundService(this, Intent(this, VpnProto.AWG.serviceClass))
+            doBindService()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to restart ${VpnProto.AWG.label} service: $e")
         }
     }
 
@@ -701,9 +718,16 @@ class AmneziaActivity : QtActivity() {
     fun start(vpnConfig: String) {
         Log.v(TAG, "Start VPN")
         mainScope.launch {
-            checkVpnPermission {
-                checkNotificationPermission {
-                    startVpn(vpnConfig)
+            // The kernel tunnel never calls VpnService.Builder, so it needs no VPN consent
+            val useKernel = getVpnProto(vpnConfig) == VpnProto.AWG &&
+                withContext(Dispatchers.IO) { KernelTunnel.isAvailable() }
+            if (useKernel) {
+                checkNotificationPermission { startVpn(vpnConfig) }
+            } else {
+                checkVpnPermission {
+                    checkNotificationPermission {
+                        startVpn(vpnConfig)
+                    }
                 }
             }
         }

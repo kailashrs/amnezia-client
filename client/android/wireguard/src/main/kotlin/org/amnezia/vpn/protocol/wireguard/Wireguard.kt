@@ -30,7 +30,7 @@ open class Wireguard : Protocol() {
     private var tunnelHandle: Int = -1
     private var config: WireguardConfig? = null // save config for reconnect
     protected open val ifName: String = "amn0"
-    private lateinit var scope: CoroutineScope
+    protected lateinit var scope: CoroutineScope
     private var statusJob: Job? = null
 
     override val statistics: Statistics

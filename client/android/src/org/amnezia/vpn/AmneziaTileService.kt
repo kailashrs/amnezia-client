@@ -14,11 +14,14 @@ import android.service.quicksettings.TileService
 import androidx.core.content.ContextCompat
 import kotlin.LazyThreadSafetyMode.NONE
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.amnezia.vpn.protocol.wireguard.KernelTunnel
 import org.amnezia.vpn.protocol.ProtocolState
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTING
@@ -177,11 +180,16 @@ class AmneziaTileService : TileService() {
         if (isServiceConnected) {
             connectToVpn()
         } else {
-            if (checkPermission()) {
-                startVpnService()
-                doBindService()
-            } else {
-                updateVpnState(DISCONNECTED)
+            scope.launch(Dispatchers.Main) {
+                // The kernel tunnel never calls VpnService.Builder, so it needs no VPN consent
+                val useKernel = vpnProto == VpnProto.AWG &&
+                    withContext(Dispatchers.IO) { KernelTunnel.isAvailable() }
+                if (useKernel || checkPermission()) {
+                    startVpnService()
+                    doBindService()
+                } else {
+                    updateVpnState(DISCONNECTED)
+                }
             }
         }
     }
