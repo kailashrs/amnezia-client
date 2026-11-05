@@ -10,6 +10,14 @@ import org.amnezia.vpn.util.net.IpRangeSet
 
 private const val TAG = "KernelTunnel"
 
+// Before netd's VPN rules at 13000, which privileged sockets can opt out of.
+private const val STRICT_RULE_PRIORITY = 12500
+
+// Every uid except root (the tunnel's own socket), radio, wifi, dhcp, clat, network stack and shell (adb).
+private val STRICT_UID_RANGES = listOf(
+    "1-1000", "1002-1009", "1011-1013", "1015-1028", "1030-1072", "1074-1999", "2001-2147483646"
+)
+
 // Installed over adb. The module is built for one kernel, so it does not ship in the APK.
 private const val ROOT_DIR = "/data/adb/amnezia-kernel"
 private const val SHELL_ENV = "export PATH=$ROOT_DIR/bin:\$PATH"
@@ -35,6 +43,48 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
     private val unblockIpv6 =
         "[ -z \"\$table\" ] || ip -6 route del unreachable ::/0 table \"\$table\" 2>/dev/null"
 
+    // A full tunnel also covers system apps, bound sockets and other users, which netd's VPN rules leave out.
+    // Split tunneling is left alone, as it would otherwise capture apps the user excluded.
+    private val strictMode = config.includedApplications.isEmpty() && config.excludedApplications.isEmpty() &&
+        config.routes.any { it.include && it.inetNetwork == InetNetwork("0.0.0.0", 0) }
+
+    private val enableStrict: String = buildList {
+        STRICT_UID_RANGES.forEach {
+            add("ip rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $it lookup $ifName")
+            add("ip -6 rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $it lookup $ifName")
+        }
+        // Rerouted sockets keep their old source address, which the server would drop.
+        config.addresses.firstOrNull { it.isIpv4 }?.let { address ->
+            add("iptables -w -t nat -N AWG_SNAT")
+            add("iptables -w -t nat -A AWG_SNAT -o $ifName ! -s ${address.address.hostAddress} -j SNAT --to-source ${address.address.hostAddress}")
+            add("iptables -w -t nat -A POSTROUTING -j AWG_SNAT")
+        }
+        // DNS bound to the underlying network would otherwise reach a resolver the tunnel can't.
+        config.dnsServers.firstOrNull { it is java.net.Inet4Address }?.hostAddress?.let { dns ->
+            add("iptables -w -t nat -N AWG_DNS")
+            STRICT_UID_RANGES.forEach { uids ->
+                listOf("udp", "tcp").forEach { protocol ->
+                    add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner $uids -p $protocol --dport 53 ! -d $dns -j DNAT --to-destination $dns:53")
+                }
+            }
+            add("iptables -w -t nat -A OUTPUT -j AWG_DNS")
+        }
+    }.joinToString(" && ")
+
+    // Rules go by priority, as a table name stops resolving once the interface is gone.
+    private val disableStrict = listOf(
+        "while ip rule del pref $STRICT_RULE_PRIORITY 2>/dev/null; do :; done",
+        "while ip -6 rule del pref $STRICT_RULE_PRIORITY 2>/dev/null; do :; done",
+        "iptables -w -t nat -D OUTPUT -j AWG_DNS 2>/dev/null",
+        "iptables -w -t nat -F AWG_DNS 2>/dev/null",
+        "iptables -w -t nat -X AWG_DNS 2>/dev/null",
+        "iptables -w -t nat -D POSTROUTING -j AWG_SNAT 2>/dev/null",
+        "iptables -w -t nat -F AWG_SNAT 2>/dev/null",
+        "iptables -w -t nat -X AWG_SNAT 2>/dev/null"
+    ).joinToString("\n")
+
+    private val tearDown = "$disableStrict\nawg-quick down $configPath\nrm -f $configPath"
+
     fun up() {
         // Built line by line: a heredoc terminator must start at column 0.
         val result = root(
@@ -44,15 +94,17 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
                 "if ip link show $ifName >/dev/null 2>&1; then",
                 findRouteTable,
                 unblockIpv6,
+                disableStrict,
                 "awg-quick down $configPath",
                 "fi",
+                disableStrict,
                 "umask 077",
                 "cat > $configPath <<'AWG_CONFIG_END'",
                 toAwgQuickString(),
                 "AWG_CONFIG_END",
                 "awg-quick up $configPath || exit \$?",
-                if (tunnelsIpv6) "exit 0" else findRouteTable,
-                "$blockIpv6 || { awg-quick down $configPath; rm -f $configPath; exit 11; }"
+                if (tunnelsIpv6) ":" else "$findRouteTable\n$blockIpv6 || { $tearDown\nexit 11; }",
+                if (strictMode) "{ $enableStrict; } || { $findRouteTable\n$unblockIpv6\n$tearDown\nexit 12; }" else ":"
             ).joinToString("\n")
         )
         if (result.exitCode != 0) {
@@ -72,12 +124,13 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
             "cmp -s $configPath $configPath.new; same=\$?",
             "rm -f $configPath.new",
             "[ \$same -eq 0 ] || exit 1",
-            if (tunnelsIpv6) "exit 0" else "ip -6 route show table $ifName | grep -q '^unreachable'"
+            if (tunnelsIpv6) ":" else "ip -6 route show table $ifName | grep -q '^unreachable' || exit 1",
+            if (strictMode) "ip rule | grep -q '^$STRICT_RULE_PRIORITY:'" else "! ip rule | grep -q '^$STRICT_RULE_PRIORITY:'"
         ).joinToString("\n")
     ).exitCode == 0
 
     fun down() {
-        val result = root("$SHELL_ENV\n$findRouteTable\n$unblockIpv6\nawg-quick down $configPath\nrm -f $configPath")
+        val result = root("$SHELL_ENV\n$findRouteTable\n$unblockIpv6\n$tearDown")
         if (result.exitCode != 0) Log.e(TAG, "awg-quick down failed: ${result.output}")
     }
 
