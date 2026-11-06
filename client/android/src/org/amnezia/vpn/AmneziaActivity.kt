@@ -287,7 +287,6 @@ class AmneziaActivity : QtActivity() {
     private fun adoptKernelTunnel() {
         Log.d(TAG, "Kernel tunnel is up without a service, restarting it")
         vpnProto = VpnProto.AWG
-        isWaitingStatus = false
         try {
             ContextCompat.startForegroundService(this, Intent(this, VpnProto.AWG.serviceClass))
             doBindService()

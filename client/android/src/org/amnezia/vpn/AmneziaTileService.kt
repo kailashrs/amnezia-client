@@ -21,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.amnezia.vpn.protocol.awg.IF_NAME
 import org.amnezia.vpn.protocol.wireguard.KernelTunnel
 import org.amnezia.vpn.protocol.ProtocolState
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
@@ -106,6 +107,11 @@ class AmneziaTileService : TileService() {
             vpnProto.also { proto ->
                 if (proto != null && AmneziaVpnService.isRunning(applicationContext, proto.processName)) {
                     Log.d(TAG, "Vpn service is running")
+                    doBindService()
+                } else if (proto == VpnProto.AWG && KernelTunnel.isInterfaceUp(IF_NAME)) {
+                    // The kernel tunnel outlives the service, so restart it to regain control.
+                    Log.d(TAG, "Kernel tunnel is up without a service, restarting it")
+                    startVpnService()
                     doBindService()
                 } else {
                     Log.d(TAG, "Vpn service is not running")
@@ -215,6 +221,9 @@ class AmneziaTileService : TileService() {
                     Intent(this, proto.serviceClass)
                 )
             } catch (e: SecurityException) {
+                Log.e(TAG, "Failed to start ${proto.serviceClass.simpleName}: $e")
+            } catch (e: IllegalStateException) {
+                // Thrown when the system doesn't allow a foreground service start from the background
                 Log.e(TAG, "Failed to start ${proto.serviceClass.simpleName}: $e")
             }
         } ?: Log.e(TAG, "Failed to start vpn service: vpnProto is null")
