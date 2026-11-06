@@ -1073,6 +1073,14 @@ class AmneziaActivity : QtActivity() {
     }
 
     @Suppress("unused")
+    fun getUserList(): String {
+        Log.v(TAG, "Get user list")
+        return blockingCall(Dispatchers.IO) {
+            KernelTunnel.otherUsers()
+        }
+    }
+
+    @Suppress("unused")
     fun getAppIcon(packageName: String, width: Int, height: Int): Bitmap {
         Log.v(TAG, "Get app icon")
         return AppListProvider.getAppIcon(packageManager, packageName, width, height)

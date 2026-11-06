@@ -294,6 +294,12 @@ QJsonArray AndroidController::getAppList()
     return jsonAppList;
 }
 
+QJsonArray AndroidController::getUserList()
+{
+    QJniObject userList = callActivityMethod<jstring>("getUserList", "()Ljava/lang/String;");
+    return QJsonDocument::fromJson(userList.toString().toUtf8()).array();
+}
+
 QPixmap AndroidController::getAppIcon(const QString &package, QSize *size, const QSize &requestedSize)
 {
     QJniObject bitmap = callActivityMethod<jobject>("getAppIcon", "(Ljava/lang/String;II)Landroid/graphics/Bitmap;",

@@ -270,6 +270,16 @@ void SecureAppSettingsRepository::setAppsSplitTunnelingEnabled(bool enabled)
     emit appsSplitTunnelingEnabledChanged(enabled);
 }
 
+QJsonArray SecureAppSettingsRepository::excludedUsers() const
+{
+    return value("Conf/excludedUsers").toJsonArray();
+}
+
+void SecureAppSettingsRepository::setExcludedUsers(const QJsonArray &users)
+{
+    setValue("Conf/excludedUsers", users);
+}
+
 QString SecureAppSettingsRepository::getGatewayEndpoint(bool isTestPurchase) const
 {
     if (isTestPurchase) {

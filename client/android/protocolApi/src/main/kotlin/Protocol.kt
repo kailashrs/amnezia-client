@@ -68,6 +68,9 @@ abstract class Protocol {
     }
 
     protected fun ProtocolConfig.Builder.configAppSplitTunneling(config: JSONObject) {
+        config.optJSONArray("excludedUsers")?.let { users ->
+            for (i in 0 until users.length()) excludeUser(users.getInt(i))
+        }
         val splitTunnelType = config.optInt("appSplitTunnelType")
         if (splitTunnelType == SPLIT_TUNNEL_DISABLE) return
         val splitTunnelApps = config.getJSONArray("splitTunnelApps")

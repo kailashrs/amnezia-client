@@ -1,5 +1,7 @@
 #include "appSplitTunnelingController.h"
 
+#include <QJsonArray>
+
 AppSplitTunnelingController::AppSplitTunnelingController(SecureAppSettingsRepository* appSettingsRepository)
     : m_appSettingsRepository(appSettingsRepository)
 {
@@ -68,3 +70,21 @@ QVector<amnezia::InstalledAppInfo> AppSplitTunnelingController::getApps() const
     return m_apps;
 }
 
+void AppSplitTunnelingController::setUserExcluded(int userId, bool excluded)
+{
+    QJsonArray users;
+    for (const auto &user : m_appSettingsRepository->excludedUsers()) {
+        if (user.toInt() != userId) {
+            users.append(user);
+        }
+    }
+    if (excluded) {
+        users.append(userId);
+    }
+    m_appSettingsRepository->setExcludedUsers(users);
+}
+
+bool AppSplitTunnelingController::isUserExcluded(int userId) const
+{
+    return m_appSettingsRepository->excludedUsers().contains(userId);
+}

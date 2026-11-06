@@ -154,6 +154,35 @@ PageType {
 
                 visible: (Qt.platform.os === "windows") && root.pageEnabled
             }
+
+            Repeater {
+                model: Qt.platform.os === "android" ? AppSplitTunnelingController.getUsers() : []
+
+                delegate: ListItemType {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+
+                    enabled: root.pageEnabled
+
+                    text: qsTr("Keep %1 out of VPN").arg(modelData.name)
+
+                    onClicked: {
+                        userSwitch.toggle()
+                        userSwitch.toggled()
+                    }
+
+                    SwitchType {
+                        id: userSwitch
+
+                        focusPolicy: Qt.NoFocus
+
+                        checked: modelData.excluded
+
+                        onToggled: AppSplitTunnelingController.setUserExcluded(modelData.id, checked)
+                    }
+                }
+            }
         }
 
         delegate: Item {

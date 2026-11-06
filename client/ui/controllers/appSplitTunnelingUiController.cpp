@@ -2,6 +2,13 @@
 
 #include <QFileInfo>
 
+#ifdef Q_OS_ANDROID
+    #include <QJsonArray>
+    #include <QJsonObject>
+
+    #include "platforms/android/android_controller.h"
+#endif
+
 #include "core/utils/errorCodes.h"
 #include "core/utils/routeModes.h"
 #include "core/utils/commonStructs.h"
@@ -77,3 +84,23 @@ void AppSplitTunnelingUiController::updateModel()
     m_appSplitTunnelingModel->updateModel(m_appSplitTunnelingController->getApps());
 }
 
+void AppSplitTunnelingUiController::setUserExcluded(int userId, bool excluded)
+{
+    m_appSplitTunnelingController->setUserExcluded(userId, excluded);
+}
+
+QVariantList AppSplitTunnelingUiController::getUsers() const
+{
+    QVariantList users;
+#ifdef Q_OS_ANDROID
+    const QJsonArray userList = AndroidController::instance()->getUserList();
+    for (const auto &value : userList) {
+        const QJsonObject user = value.toObject();
+        const int id = user.value("id").toInt();
+        users.append(QVariantMap { { "id", id },
+                                   { "name", user.value("name").toString() },
+                                   { "excluded", m_appSplitTunnelingController->isUserExcluded(id) } });
+    }
+#endif
+    return users;
+}

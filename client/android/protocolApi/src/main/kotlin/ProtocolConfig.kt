@@ -17,6 +17,7 @@ open class ProtocolConfig protected constructor(
     val excludedAddresses: Set<InetNetwork>,
     val includedApplications: Set<String>,
     val excludedApplications: Set<String>,
+    val excludedUsers: Set<Int>,
     val httpProxy: ProxyInfo?,
     val allowAllAF: Boolean,
     val blockingMode: Boolean,
@@ -32,6 +33,7 @@ open class ProtocolConfig protected constructor(
         builder.excludedAddresses,
         builder.includedApplications,
         builder.excludedApplications,
+        builder.excludedUsers,
         builder.httpProxy,
         builder.allowAllAF,
         builder.blockingMode,
@@ -46,6 +48,7 @@ open class ProtocolConfig protected constructor(
         internal val excludedAddresses: MutableSet<InetNetwork> = hashSetOf()
         internal val includedApplications: MutableSet<String> = hashSetOf()
         internal val excludedApplications: MutableSet<String> = hashSetOf()
+        internal val excludedUsers: MutableSet<Int> = hashSetOf()
 
         internal var searchDomain: String? = null
             private set
@@ -100,6 +103,7 @@ open class ProtocolConfig protected constructor(
         fun includeApplications(applications: Collection<String>) = apply { this.includedApplications += applications }
 
         fun excludeApplication(application: String) = apply { this.excludedApplications += application }
+        fun excludeUser(user: Int) = apply { this.excludedUsers += user }
         fun excludeApplications(applications: Collection<String>) = apply { this.excludedApplications += applications }
 
         @RequiresApi(Build.VERSION_CODES.Q)

@@ -17,10 +17,12 @@ public:
     void clearAppsList();
     void setRouteMode(AppsRouteMode routeMode);
     void toggleSplitTunneling(bool enabled);
+    void setUserExcluded(int userId, bool excluded);
 
     AppsRouteMode getRouteMode() const;
     bool isSplitTunnelingEnabled() const;
     QVector<amnezia::InstalledAppInfo> getApps() const;
+    bool isUserExcluded(int userId) const;
 
 private:
     SecureAppSettingsRepository* m_appSettingsRepository;

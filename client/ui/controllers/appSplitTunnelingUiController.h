@@ -2,6 +2,7 @@
 #define APPSPLITTUNNELINGUICONTROLLER_H
 
 #include <QObject>
+#include <QVariantList>
 #include <QVector>
 
 #include "core/controllers/appSplitTunnelingController.h"
@@ -28,6 +29,9 @@ public slots:
     void removeApp(const int index);
     void toggleSplitTunneling(bool enabled);
     void setRouteMode(int routeMode);
+    void setUserExcluded(int userId, bool excluded);
+
+    QVariantList getUsers() const;
 
     int getRouteMode() const;
     bool isSplitTunnelingEnabled() const;

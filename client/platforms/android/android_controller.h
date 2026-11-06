@@ -51,6 +51,7 @@ public:
     void setNavigationBarColor(unsigned int color);
     void minimizeApp();
     QJsonArray getAppList();
+    QJsonArray getUserList();
     QPixmap getAppIcon(const QString &package, QSize *size, const QSize &requestedSize);
     bool isNotificationPermissionGranted();
     void requestNotificationPermission();

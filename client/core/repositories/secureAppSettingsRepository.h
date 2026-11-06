@@ -1,6 +1,7 @@
 #ifndef SECUREAPPSETTINGSREPOSITORY_H
 #define SECUREAPPSETTINGSREPOSITORY_H
 
+#include <QJsonArray>
 #include <QObject>
 #include <QLocale>
 #include <QString>
@@ -56,6 +57,8 @@ public:
     QVector<InstalledAppInfo> vpnApps(AppsRouteMode mode) const;
     bool isAppsSplitTunnelingEnabled() const;
     void setAppsSplitTunnelingEnabled(bool enabled);
+    QJsonArray excludedUsers() const;
+    void setExcludedUsers(const QJsonArray &users);
 
     QString getGatewayEndpoint(bool isTestPurchase = false) const;
     void setGatewayEndpoint(const QString &endpoint);

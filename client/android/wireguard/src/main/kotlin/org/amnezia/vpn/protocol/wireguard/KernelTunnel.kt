@@ -7,6 +7,8 @@ import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.net.InetNetwork
 import org.amnezia.vpn.util.net.IpRange
 import org.amnezia.vpn.util.net.IpRangeSet
+import org.json.JSONArray
+import org.json.JSONObject
 
 private const val TAG = "KernelTunnel"
 
@@ -24,6 +26,10 @@ private const val SHELL_ENV = "export PATH=$ROOT_DIR/bin:\$PATH"
 private const val COMMAND_TIMEOUT_SECONDS = 30L
 
 private val PACKAGE_UIDS = Regex("package:(\\S+) uid:([0-9,]+)")
+private val PACKAGE_NAME = Regex("[A-Za-z0-9_.]+")
+private val USER_INFO = Regex("UserInfo\\{([0-9]+):(.*):[0-9a-f]+\\}.*")
+
+private const val UIDS_PER_USER = 100000
 
 /** Runs an AmneziaWG tunnel through the amneziawg kernel module and awg-quick, as root. */
 class KernelTunnel(private val ifName: String, private val config: WireguardConfig) {
@@ -46,13 +52,15 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         "[ -z \"\$table\" ] || ip -6 route del unreachable ::/0 table \"\$table\" 2>/dev/null"
 
     // A full tunnel also covers system apps, bound sockets and other users, which netd's VPN rules leave out.
-    // Excluded apps stay out by uid. An included-apps list means only those apps should use the tunnel.
+    // Excluded apps and users stay out by uid. An included-apps list means only those apps should use the tunnel.
     private val strictMode = config.includedApplications.isEmpty() &&
         config.routes.any { it.include && it.inetNetwork == InetNetwork("0.0.0.0", 0) }
 
     // Called only on start: resolving uids needs a pm call.
     private fun enableStrict(): String = buildList {
-        val excludedUids = excludedUids()
+        val excludedUids = excludedUids() + config.excludedUsers.map {
+            it * UIDS_PER_USER until (it + 1) * UIDS_PER_USER
+        }
         STRICT_UID_RANGES.flatMap { it.without(excludedUids) }.forEach {
             val uids = "${it.first}-${it.last}"
             add("ip rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $uids lookup $ifName")
@@ -67,7 +75,9 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         // DNS bound to the underlying network would otherwise reach a resolver the tunnel can't.
         config.dnsServers.firstOrNull { it is java.net.Inet4Address }?.hostAddress?.let { dns ->
             add("iptables -w -t nat -N AWG_DNS")
-            excludedUids.forEach { add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner $it -j RETURN") }
+            excludedUids.forEach {
+                add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner ${it.first}-${it.last} -j RETURN")
+            }
             STRICT_UID_RANGES.forEach {
                 listOf("udp", "tcp").forEach { protocol ->
                     add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner ${it.first}-${it.last} -p $protocol --dport 53 ! -d $dns -j DNAT --to-destination $dns:53")
@@ -78,7 +88,7 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
     }.joinToString(" && ")
 
     /** Returns the excluded apps' uids in every user they're installed for. */
-    private fun excludedUids(): List<Int> {
+    private fun excludedUids(): List<IntRange> {
         if (config.excludedApplications.isEmpty()) return emptyList()
         val result = root("pm list packages -U")
         // Without this list the rules would capture every excluded app.
@@ -89,15 +99,15 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
             .mapNotNull { PACKAGE_UIDS.matchEntire(it.trim()) }
             .filter { it.groupValues[1] in config.excludedApplications }
             .flatMap { it.groupValues[2].split(",") }
-            .map { it.toInt() }
+            .map { it.toInt().let { uid -> uid..uid } }
             .toList()
     }
 
-    private fun IntRange.without(uids: List<Int>): List<IntRange> = buildList {
+    private fun IntRange.without(excluded: List<IntRange>): List<IntRange> = buildList {
         var start = first
-        uids.filter { it in this@without }.distinct().sorted().forEach {
-            if (it > start) add(start until it)
-            start = it + 1
+        excluded.filter { it.first <= last && it.last >= first }.sortedBy { it.first }.forEach {
+            if (it.first > start) add(start until it.first)
+            start = maxOf(start, it.last + 1)
         }
         if (start <= last) add(start..last)
     }
@@ -117,7 +127,6 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
     private val tearDown = "$disableStrict\nawg-quick down $configPath\nrm -f $configPath"
 
     fun up() {
-        // Built line by line: a heredoc terminator must start at column 0.
         val result = root(
             listOf(
                 SHELL_ENV,
@@ -130,9 +139,7 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
                 "fi",
                 disableStrict,
                 "umask 077",
-                "cat > $configPath <<'AWG_CONFIG_END'",
-                toAwgQuickString(),
-                "AWG_CONFIG_END",
+                writeConfig(configPath),
                 "awg-quick up $configPath || exit \$?",
                 if (tunnelsIpv6) ":" else "$findRouteTable\n$blockIpv6 || { $tearDown\nexit 11; }",
                 if (strictMode) "{ ${enableStrict()}; } || { $findRouteTable\n$unblockIpv6\n$tearDown\nexit 12; }" else ":"
@@ -149,9 +156,7 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
             SHELL_ENV,
             "[ -d /sys/class/net/$ifName ] || exit 1",
             "umask 077",
-            "cat > $configPath.new <<'AWG_CONFIG_END'",
-            toAwgQuickString(),
-            "AWG_CONFIG_END",
+            writeConfig("$configPath.new"),
             "cmp -s $configPath $configPath.new; same=\$?",
             "rm -f $configPath.new",
             "[ \$same -eq 0 ] || exit 1",
@@ -183,7 +188,17 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         return rx to tx
     }
 
+    // Config values come from imported files, so they never reach the root shell as text. echo is a builtin,
+    // which keeps the keys out of process arguments.
+    private fun writeConfig(path: String): String {
+        val encoded = Base64.encodeToString((toAwgQuickString() + "\n").toByteArray(), Base64.NO_WRAP)
+        return "echo $encoded | base64 -d > $path"
+    }
+
     private fun toAwgQuickString(): String = with(StringBuilder()) {
+        (config.includedApplications + config.excludedApplications).forEach {
+            if (!PACKAGE_NAME.matches(it)) throw VpnStartException("Invalid package name: $it")
+        }
         appendLine("[Interface]")
         appendLine("PrivateKey=${config.privateKeyHex.hexToBase64()}")
         appendLine("Address=${config.addresses.joinToString(",")}")
@@ -203,16 +218,18 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         config.preSharedKeyHex?.let { appendLine("PresharedKey=${it.hexToBase64()}") }
         appendLine("AllowedIPs=${allowedIps().joinToString(",")}")
         appendLine("Endpoint=${config.endpoint}")
-        config.persistentKeepalive?.takeIf { it.isNotEmpty() && it != "0" }?.let {
-            appendLine("PersistentKeepalive=$it")
-        }
+        line("PersistentKeepalive", config.persistentKeepalive?.takeIf { it != "0" })
         toString().trimEnd()
     }
 
+    private fun StringBuilder.line(key: String, value: Any?) {
+        val text = value?.toString().orEmpty()
+        // A line break would add lines of its own to the config.
+        if (text.any { it.isISOControl() }) throw VpnStartException("Invalid value for $key")
+        if (text.isNotEmpty()) appendLine("$key=$text")
+    }
+
     private fun StringBuilder.appendObfuscation() = with(config) {
-        fun line(key: String, value: Any?) {
-            if (value != null && value.toString().isNotEmpty()) appendLine("$key=$value")
-        }
         if (useProtocolExtension) {
             line("Jc", jc); line("Jmin", jmin); line("Jmax", jmax)
             line("S1", s1); line("S2", s2); line("S3", s3); line("S4", s4)
@@ -256,6 +273,18 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
 
         /** True when an interface outlived the process that created it, for example after a crash. */
         fun isInterfaceUp(ifName: String): Boolean = root("[ -d /sys/class/net/$ifName ]").exitCode == 0
+
+        /** Returns the device's other users as a JSON array. The tunnel's own user can't be left out. */
+        fun otherUsers(): String {
+            val users = JSONArray()
+            root("pm list users").output.lineSequence()
+                .mapNotNull { USER_INFO.matchEntire(it.trim()) }
+                .filter { it.groupValues[1] != "0" }
+                .forEach {
+                    users.put(JSONObject().put("id", it.groupValues[1].toInt()).put("name", it.groupValues[2]))
+                }
+            return users.toString()
+        }
 
         private data class Result(val exitCode: Int, val output: String)
 
