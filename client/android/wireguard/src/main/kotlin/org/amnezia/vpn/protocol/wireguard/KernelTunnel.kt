@@ -15,13 +15,15 @@ private const val STRICT_RULE_PRIORITY = 12500
 
 // Every uid except root (the tunnel's own socket), radio, wifi, dhcp, clat, network stack and shell (adb).
 private val STRICT_UID_RANGES = listOf(
-    "1-1000", "1002-1009", "1011-1013", "1015-1028", "1030-1072", "1074-1999", "2001-2147483646"
+    1..1000, 1002..1009, 1011..1013, 1015..1028, 1030..1072, 1074..1999, 2001..2147483646
 )
 
 // Installed over adb. The module is built for one kernel, so it does not ship in the APK.
 private const val ROOT_DIR = "/data/adb/amnezia-kernel"
 private const val SHELL_ENV = "export PATH=$ROOT_DIR/bin:\$PATH"
 private const val COMMAND_TIMEOUT_SECONDS = 30L
+
+private val PACKAGE_UIDS = Regex("package:(\\S+) uid:([0-9,]+)")
 
 /** Runs an AmneziaWG tunnel through the amneziawg kernel module and awg-quick, as root. */
 class KernelTunnel(private val ifName: String, private val config: WireguardConfig) {
@@ -44,14 +46,17 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         "[ -z \"\$table\" ] || ip -6 route del unreachable ::/0 table \"\$table\" 2>/dev/null"
 
     // A full tunnel also covers system apps, bound sockets and other users, which netd's VPN rules leave out.
-    // Split tunneling is left alone, as it would otherwise capture apps the user excluded.
-    private val strictMode = config.includedApplications.isEmpty() && config.excludedApplications.isEmpty() &&
+    // Excluded apps stay out by uid. An included-apps list means only those apps should use the tunnel.
+    private val strictMode = config.includedApplications.isEmpty() &&
         config.routes.any { it.include && it.inetNetwork == InetNetwork("0.0.0.0", 0) }
 
-    private val enableStrict: String = buildList {
-        STRICT_UID_RANGES.forEach {
-            add("ip rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $it lookup $ifName")
-            add("ip -6 rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $it lookup $ifName")
+    // Called only on start: resolving uids needs a pm call.
+    private fun enableStrict(): String = buildList {
+        val excludedUids = excludedUids()
+        STRICT_UID_RANGES.flatMap { it.without(excludedUids) }.forEach {
+            val uids = "${it.first}-${it.last}"
+            add("ip rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $uids lookup $ifName")
+            add("ip -6 rule add pref $STRICT_RULE_PRIORITY iif lo uidrange $uids lookup $ifName")
         }
         // Rerouted sockets keep their old source address, which the server would drop.
         config.addresses.firstOrNull { it.isIpv4 }?.let { address ->
@@ -62,14 +67,40 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
         // DNS bound to the underlying network would otherwise reach a resolver the tunnel can't.
         config.dnsServers.firstOrNull { it is java.net.Inet4Address }?.hostAddress?.let { dns ->
             add("iptables -w -t nat -N AWG_DNS")
-            STRICT_UID_RANGES.forEach { uids ->
+            excludedUids.forEach { add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner $it -j RETURN") }
+            STRICT_UID_RANGES.forEach {
                 listOf("udp", "tcp").forEach { protocol ->
-                    add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner $uids -p $protocol --dport 53 ! -d $dns -j DNAT --to-destination $dns:53")
+                    add("iptables -w -t nat -A AWG_DNS -m owner --uid-owner ${it.first}-${it.last} -p $protocol --dport 53 ! -d $dns -j DNAT --to-destination $dns:53")
                 }
             }
             add("iptables -w -t nat -A OUTPUT -j AWG_DNS")
         }
     }.joinToString(" && ")
+
+    /** Returns the excluded apps' uids in every user they're installed for. */
+    private fun excludedUids(): List<Int> {
+        if (config.excludedApplications.isEmpty()) return emptyList()
+        val result = root("pm list packages -U")
+        // Without this list the rules would capture every excluded app.
+        if (result.exitCode != 0 || !result.output.contains("package:")) {
+            throw VpnStartException("Can't resolve excluded apps: ${result.output}")
+        }
+        return result.output.lineSequence()
+            .mapNotNull { PACKAGE_UIDS.matchEntire(it.trim()) }
+            .filter { it.groupValues[1] in config.excludedApplications }
+            .flatMap { it.groupValues[2].split(",") }
+            .map { it.toInt() }
+            .toList()
+    }
+
+    private fun IntRange.without(uids: List<Int>): List<IntRange> = buildList {
+        var start = first
+        uids.filter { it in this@without }.distinct().sorted().forEach {
+            if (it > start) add(start until it)
+            start = it + 1
+        }
+        if (start <= last) add(start..last)
+    }
 
     // Rules go by priority, as a table name stops resolving once the interface is gone.
     private val disableStrict = listOf(
@@ -104,7 +135,7 @@ class KernelTunnel(private val ifName: String, private val config: WireguardConf
                 "AWG_CONFIG_END",
                 "awg-quick up $configPath || exit \$?",
                 if (tunnelsIpv6) ":" else "$findRouteTable\n$blockIpv6 || { $tearDown\nexit 11; }",
-                if (strictMode) "{ $enableStrict; } || { $findRouteTable\n$unblockIpv6\n$tearDown\nexit 12; }" else ":"
+                if (strictMode) "{ ${enableStrict()}; } || { $findRouteTable\n$unblockIpv6\n$tearDown\nexit 12; }" else ":"
             ).joinToString("\n")
         )
         if (result.exitCode != 0) {
